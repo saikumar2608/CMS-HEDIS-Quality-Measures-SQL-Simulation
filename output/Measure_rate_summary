@@ -1,0 +1,7 @@
+measure_id,measurement_year,denom_count,excl_count,numer_count,rate,direction,run_dt
+FUH_2022,2022,10,0,5,0.5000,Higher is better,2026-03-01 18:33:48
+FUH_2023,2023,5,0,2,0.4000,Higher is better,2026-03-01 18:33:48
+PDC_DM_2022,2022,8,0,4,0.5000,Higher is better,2026-03-01 18:33:48
+PDC_DM_2023,2023,4,0,3,0.7500,Higher is better,2026-03-01 18:33:48
+READMIT_30_2022,2022,19,11,5,0.2632,Lower is better,2026-03-01 18:33:48
+READMIT_30_2023,2023,13,5,3,0.2308,Lower is better,2026-03-01 18:33:48
