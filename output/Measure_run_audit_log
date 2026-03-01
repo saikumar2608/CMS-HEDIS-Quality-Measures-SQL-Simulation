@@ -1,0 +1,7 @@
+run_id,measure_id,run_dt,measurement_year,pdc_threshold_or_lookback_days,drug_class_or_dx_filter,excl_death,excl_transfer,min_age,code_version,run_by,row_count_denom,row_count_numer,rate
+1,READMIT_30_2022,2026-03-01 18:33:48,2022,30_days,,true,true,18,v1.0.0,saikumar,19,5,0.2632
+2,READMIT_30_2023,2026-03-01 18:33:48,2023,30_days,,true,true,18,v1.0.0,saikumar,13,3,0.2308
+3,PDC_DM_2022,2026-03-01 18:33:48,2022,0.80,antidiabetic,,,18,v1.0.0,saikumar,8,4,0.5000
+4,PDC_DM_2023,2026-03-01 18:33:48,2023,0.80,antidiabetic,,,18,v1.0.0,saikumar,4,3,0.7500
+5,FUH_2022,2026-03-01 18:33:48,2022,7_days,F%,true,true,6,v1.0.0,saikumar,10,5,0.5000
+6,FUH_2023,2026-03-01 18:33:48,2023,7_days,F%,true,true,6,v1.0.0,saikumar,5,2,0.4000
