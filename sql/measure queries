@@ -1,0 +1,546 @@
+
+
+
+-- ===========================================================================
+-- MEASURE 1: 30-DAY ALL-CAUSE READMISSION (READMIT_30)
+-- ===========================================================================
+-- Denominator: IP discharges in measurement year, age 18+,
+--              30-day continuous enrollment before AND after discharge.
+-- Exclusions:  Death during index stay (discharge_status = '20'),
+--              Transfer (discharge_status = '30'),
+--              Mental health principal dx (F codes) on index stay.
+-- Numerator:   Unplanned IP readmission within 30 days of index discharge.
+-- Rate:        numerator / denominator
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- 1A. Identify index IP discharges — 2022
+-- ---------------------------------------------------------------------------
+WITH index_stays_2022 AS (
+    SELECT
+        e.encounter_id,
+        e.member_id,
+        e.facility_id,
+        e.admit_dt,
+        e.discharge_dt,
+        e.primary_dx,
+        e.discharge_status,
+        e.paid_amt,
+        DATE_PART('year', AGE(e.discharge_dt, m.dob)) AS age_at_discharge,
+        m.death_dt
+    FROM encounter_fact e
+    JOIN member_dim m ON e.member_id = m.member_id
+    WHERE e.enc_type = 'IP'
+      AND DATE_PART('year', e.discharge_dt) = 2022
+      AND e.discharge_dt IS NOT NULL
+),
+
+-- ---------------------------------------------------------------------------
+-- 1B. Apply denominator criteria (age 18+, continuous enrollment ±30 days)
+-- ---------------------------------------------------------------------------
+denom_eligible_2022 AS (
+    SELECT
+        i.*,
+        -- Check 30-day pre-discharge enrollment
+        (SELECT 1 FROM eligibility_fact el
+         WHERE el.member_id = i.member_id
+           AND el.cov_start_dt <= (i.discharge_dt - INTERVAL '30 days')::DATE
+           AND el.cov_end_dt   >= (i.discharge_dt - INTERVAL '30 days')::DATE
+         LIMIT 1) AS pre_enrolled,
+        -- Check 30-day post-discharge enrollment
+        (SELECT 1 FROM eligibility_fact el
+         WHERE el.member_id = i.member_id
+           AND el.cov_start_dt <= (i.discharge_dt + INTERVAL '30 days')::DATE
+           AND el.cov_end_dt   >= (i.discharge_dt + INTERVAL '30 days')::DATE
+         LIMIT 1) AS post_enrolled
+    FROM index_stays_2022 i
+    WHERE i.age_at_discharge >= 18
+),
+
+-- ---------------------------------------------------------------------------
+-- 1C. Apply exclusions
+-- ---------------------------------------------------------------------------
+denom_with_exclusions_2022 AS (
+    SELECT
+        d.*,
+        CASE
+            WHEN d.discharge_status = '20'           THEN 1  -- death
+            WHEN d.discharge_status = '30'           THEN 1  -- transfer
+            WHEN d.primary_dx LIKE 'F%'              THEN 1  -- psych primary dx
+            WHEN d.pre_enrolled IS NULL              THEN 1  -- no pre-enrollment
+            WHEN d.post_enrolled IS NULL             THEN 1  -- no post-enrollment
+            ELSE 0
+        END AS exclusion_flag,
+        CASE
+            WHEN d.discharge_status = '20'           THEN 'EXCL_DEATH'
+            WHEN d.discharge_status = '30'           THEN 'EXCL_TRANSFER'
+            WHEN d.primary_dx LIKE 'F%'              THEN 'EXCL_PSYCH_DX'
+            WHEN d.pre_enrolled IS NULL              THEN 'EXCL_NO_PRE_ENROLL'
+            WHEN d.post_enrolled IS NULL             THEN 'EXCL_NO_POST_ENROLL'
+            ELSE 'DENOM_MET'
+        END AS reason_code
+    FROM denom_eligible_2022 d
+),
+
+-- ---------------------------------------------------------------------------
+-- 1D. Check numerator — unplanned IP readmission within 30 days
+-- ---------------------------------------------------------------------------
+readmit_results_2022 AS (
+    SELECT
+        d.encounter_id      AS index_encounter_id,
+        d.member_id,
+        d.facility_id,
+        d.discharge_dt      AS index_discharge_dt,
+        d.exclusion_flag,
+        d.reason_code,
+        CASE WHEN d.exclusion_flag = 0 THEN 1 ELSE 0 END AS denominator_flag,
+        CASE
+            WHEN d.exclusion_flag = 0
+             AND EXISTS (
+                SELECT 1 FROM encounter_fact r
+                WHERE r.member_id    = d.member_id
+                  AND r.enc_type     = 'IP'
+                  AND r.encounter_id != d.encounter_id
+                  AND r.admit_dt     > d.discharge_dt
+                  AND r.admit_dt    <= (d.discharge_dt + INTERVAL '30 days')::DATE
+                  AND r.primary_dx NOT LIKE 'F%'  -- exclude planned psych
+             )
+            THEN 1 ELSE 0
+        END AS numerator_flag,
+        2022 AS measurement_year
+    FROM denom_with_exclusions_2022 d
+)
+
+SELECT
+    'READMIT_30' AS measure_id,
+    measurement_year,
+    index_encounter_id,
+    member_id,
+    facility_id,
+    index_discharge_dt,
+    denominator_flag,
+    exclusion_flag,
+    numerator_flag,
+    reason_code
+FROM readmit_results_2022
+ORDER BY member_id, index_discharge_dt;
+
+
+-- ---------------------------------------------------------------------------
+-- 1E. Same logic — 2023 (collapsed for brevity, same pattern)
+-- ---------------------------------------------------------------------------
+WITH index_stays_2023 AS (
+    SELECT e.encounter_id, e.member_id, e.facility_id, e.admit_dt,
+           e.discharge_dt, e.primary_dx, e.discharge_status, e.paid_amt,
+           DATE_PART('year', AGE(e.discharge_dt, m.dob)) AS age_at_discharge
+    FROM encounter_fact e
+    JOIN member_dim m ON e.member_id = m.member_id
+    WHERE e.enc_type = 'IP'
+      AND DATE_PART('year', e.discharge_dt) = 2023
+      AND e.discharge_dt IS NOT NULL
+),
+readmit_2023 AS (
+    SELECT
+        i.encounter_id, i.member_id, i.facility_id, i.discharge_dt,
+        CASE WHEN i.primary_dx LIKE 'F%' THEN 1 ELSE 0 END AS exclusion_flag,
+        CASE WHEN i.age_at_discharge < 18 THEN 'EXCL_AGE'
+             WHEN i.primary_dx LIKE 'F%'  THEN 'EXCL_PSYCH_DX'
+             ELSE 'DENOM_MET'
+        END AS reason_code,
+        CASE WHEN i.age_at_discharge >= 18 AND i.primary_dx NOT LIKE 'F%' THEN 1 ELSE 0 END AS denominator_flag,
+        CASE WHEN EXISTS (
+                SELECT 1 FROM encounter_fact r
+                WHERE r.member_id    = i.member_id
+                  AND r.enc_type     = 'IP'
+                  AND r.encounter_id != i.encounter_id
+                  AND r.admit_dt     > i.discharge_dt
+                  AND r.admit_dt    <= (i.discharge_dt + INTERVAL '30 days')::DATE
+             )
+             AND i.age_at_discharge >= 18
+             AND i.primary_dx NOT LIKE 'F%'
+        THEN 1 ELSE 0 END AS numerator_flag,
+        2023 AS measurement_year
+    FROM index_stays_2023 i
+)
+SELECT 'READMIT_30' AS measure_id, measurement_year, encounter_id,
+       member_id, facility_id, discharge_dt,
+       denominator_flag, exclusion_flag, numerator_flag, reason_code
+FROM readmit_2023
+ORDER BY member_id, discharge_dt;
+
+
+-- ===========================================================================
+-- MEASURE 2: MEDICATION ADHERENCE FOR DIABETES — PDC (PDC_DM)
+-- ===========================================================================
+-- Denominator: Members 18-75 with ≥2 antidiabetic fills in measurement year,
+--              365-day continuous enrollment.
+-- Exclusions:  No fills, enrollment gap > 45 days.
+-- Numerator:   PDC ≥ 0.80 (covered_days / 365).
+-- PDC method:  Expand each fill to its covered window; merge overlapping
+--              windows; count unique covered days within Jan 1 – Dec 31.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- 2A. Generate daily coverage series per fill — 2022
+--     (PostgreSQL: use generate_series to expand fills to day-level)
+-- ---------------------------------------------------------------------------
+WITH fill_windows_2022 AS (
+    SELECT
+        p.member_id,
+        p.fill_dt                                     AS fill_start,
+        (p.fill_dt + p.days_supply - 1)::DATE         AS fill_end,  -- last covered day
+        LEAST((p.fill_dt + p.days_supply - 1)::DATE,
+              '2022-12-31'::DATE)                     AS capped_end
+    FROM pharmacy_claim_fact p
+    JOIN drug_dim d ON p.ndc = d.ndc
+    WHERE d.is_antidiabetic_flag = TRUE
+      AND p.fill_dt BETWEEN '2022-01-01' AND '2022-12-31'
+),
+
+-- Expand to individual covered days (capped at Dec 31)
+covered_days_raw_2022 AS (
+    SELECT
+        member_id,
+        generate_series(
+            GREATEST(fill_start, '2022-01-01'::DATE),
+            capped_end,
+            '1 day'::INTERVAL
+        )::DATE AS covered_day
+    FROM fill_windows_2022
+),
+
+-- Deduplicate overlapping fill days (core of PDC algorithm)
+unique_covered_days_2022 AS (
+    SELECT member_id, covered_day
+    FROM covered_days_raw_2022
+    GROUP BY member_id, covered_day  -- DISTINCT day per member
+),
+
+-- Count unique covered days per member
+pdc_numerator_days_2022 AS (
+    SELECT
+        member_id,
+        COUNT(*) AS covered_days
+    FROM unique_covered_days_2022
+    GROUP BY member_id
+),
+
+-- Count fills to confirm ≥2 for denominator
+fill_count_2022 AS (
+    SELECT
+        p.member_id,
+        COUNT(*) AS fill_count
+    FROM pharmacy_claim_fact p
+    JOIN drug_dim d ON p.ndc = d.ndc
+    WHERE d.is_antidiabetic_flag = TRUE
+      AND p.fill_dt BETWEEN '2022-01-01' AND '2022-12-31'
+    GROUP BY p.member_id
+),
+
+-- Confirm 365-day enrollment in 2022
+enrolled_365_2022 AS (
+    SELECT DISTINCT member_id
+    FROM eligibility_fact
+    WHERE cov_start_dt <= '2022-01-01'
+      AND cov_end_dt   >= '2022-12-31'
+),
+
+-- Assemble PDC result
+pdc_result_2022 AS (
+    SELECT
+        fc.member_id,
+        fc.fill_count,
+        COALESCE(pd.covered_days, 0)                         AS covered_days,
+        365                                                   AS eligible_days,
+        ROUND(COALESCE(pd.covered_days, 0) / 365.0, 4)       AS pdc,
+        CASE WHEN e365.member_id IS NULL THEN 1 ELSE 0 END   AS exclusion_flag,
+        CASE WHEN e365.member_id IS NULL THEN 'EXCL_ENROLLMENT_GAP'
+             WHEN fc.fill_count < 2       THEN 'EXCL_INSUFFICIENT_FILLS'
+             ELSE 'DENOM_MET'
+        END                                                   AS reason_code,
+        CASE WHEN e365.member_id IS NOT NULL
+              AND fc.fill_count >= 2 THEN 1 ELSE 0 END        AS denominator_flag,
+        CASE WHEN COALESCE(pd.covered_days,0) / 365.0 >= 0.80
+              AND e365.member_id IS NOT NULL
+              AND fc.fill_count >= 2 THEN 1 ELSE 0 END        AS numerator_flag,
+        2022 AS measurement_year
+    FROM fill_count_2022 fc
+    LEFT JOIN pdc_numerator_days_2022 pd ON fc.member_id = pd.member_id
+    LEFT JOIN enrolled_365_2022 e365     ON fc.member_id = e365.member_id
+)
+
+SELECT
+    'PDC_DM'           AS measure_id,
+    measurement_year,
+    member_id,
+    fill_count,
+    covered_days,
+    eligible_days,
+    pdc,
+    denominator_flag,
+    exclusion_flag,
+    numerator_flag,
+    reason_code,
+    CASE WHEN pdc >= 0.80 THEN 'ADHERENT' ELSE 'NON-ADHERENT' END AS adherence_status
+FROM pdc_result_2022
+ORDER BY pdc DESC;
+
+
+-- ---------------------------------------------------------------------------
+-- 2B. PDC 2023 — same logic, different year
+-- ---------------------------------------------------------------------------
+WITH fill_windows_2023 AS (
+    SELECT p.member_id,
+           p.fill_dt AS fill_start,
+           (p.fill_dt + p.days_supply - 1)::DATE AS fill_end,
+           LEAST((p.fill_dt + p.days_supply - 1)::DATE,'2023-12-31'::DATE) AS capped_end
+    FROM pharmacy_claim_fact p
+    JOIN drug_dim d ON p.ndc = d.ndc
+    WHERE d.is_antidiabetic_flag = TRUE
+      AND p.fill_dt BETWEEN '2023-01-01' AND '2023-12-31'
+),
+covered_days_2023 AS (
+    SELECT member_id,
+           generate_series(GREATEST(fill_start,'2023-01-01'::DATE), capped_end,'1 day'::INTERVAL)::DATE AS covered_day
+    FROM fill_windows_2023
+),
+unique_days_2023   AS (SELECT member_id, covered_day FROM covered_days_2023 GROUP BY member_id, covered_day),
+pdc_days_2023      AS (SELECT member_id, COUNT(*) AS covered_days FROM unique_days_2023 GROUP BY member_id),
+fills_2023         AS (
+    SELECT p.member_id, COUNT(*) AS fill_count
+    FROM pharmacy_claim_fact p JOIN drug_dim d ON p.ndc=d.ndc
+    WHERE d.is_antidiabetic_flag=TRUE AND p.fill_dt BETWEEN '2023-01-01' AND '2023-12-31'
+    GROUP BY p.member_id
+),
+enroll_2023 AS (SELECT DISTINCT member_id FROM eligibility_fact WHERE cov_start_dt<='2023-01-01' AND cov_end_dt>='2023-12-31')
+
+SELECT 'PDC_DM' AS measure_id, 2023 AS measurement_year,
+       f.member_id, f.fill_count,
+       COALESCE(d.covered_days,0) AS covered_days, 365 AS eligible_days,
+       ROUND(COALESCE(d.covered_days,0)/365.0,4) AS pdc,
+       CASE WHEN e.member_id IS NOT NULL AND f.fill_count>=2 THEN 1 ELSE 0 END AS denominator_flag,
+       CASE WHEN e.member_id IS NULL THEN 1 ELSE 0 END AS exclusion_flag,
+       CASE WHEN COALESCE(d.covered_days,0)/365.0>=0.80 AND e.member_id IS NOT NULL AND f.fill_count>=2 THEN 1 ELSE 0 END AS numerator_flag,
+       CASE WHEN e.member_id IS NULL THEN 'EXCL_ENROLLMENT_GAP' WHEN f.fill_count<2 THEN 'EXCL_INSUFFICIENT_FILLS' ELSE 'DENOM_MET' END AS reason_code,
+       CASE WHEN COALESCE(d.covered_days,0)/365.0>=0.80 THEN 'ADHERENT' ELSE 'NON-ADHERENT' END AS adherence_status
+FROM fills_2023 f
+LEFT JOIN pdc_days_2023 d ON f.member_id=d.member_id
+LEFT JOIN enroll_2023 e   ON f.member_id=e.member_id
+ORDER BY pdc DESC;
+
+
+-- ===========================================================================
+-- MEASURE 3: FOLLOW-UP AFTER HOSPITALIZATION FOR MENTAL ILLNESS (FUH)
+-- ===========================================================================
+-- Denominator: IP discharge with mental health principal dx (F20-F99),
+--              age 6+, continuous enrollment 30 days post-discharge.
+-- Exclusions:  Death during stay (discharge_status='20'), transfer to SNF.
+-- Numerator:   Outpatient mental health follow-up visit within 7 days.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- 3A. Mental health index discharges — 2022
+-- ---------------------------------------------------------------------------
+WITH mh_index_2022 AS (
+    SELECT
+        e.encounter_id,
+        e.member_id,
+        e.facility_id,
+        e.admit_dt,
+        e.discharge_dt,
+        e.primary_dx,
+        e.discharge_status,
+        DATE_PART('year', AGE(e.discharge_dt, m.dob)) AS age_at_discharge
+    FROM encounter_fact e
+    JOIN member_dim m ON e.member_id = m.member_id
+    WHERE e.enc_type = 'IP'
+      AND e.primary_dx LIKE 'F%'
+      AND DATE_PART('year', e.discharge_dt) = 2022
+      AND e.discharge_dt IS NOT NULL
+),
+
+-- ---------------------------------------------------------------------------
+-- 3B. Denominator + exclusions
+-- ---------------------------------------------------------------------------
+fuh_denom_2022 AS (
+    SELECT
+        i.*,
+        CASE
+            WHEN i.discharge_status = '20'    THEN 1  -- death
+            WHEN i.discharge_status = '30'    THEN 1  -- transfer
+            WHEN i.age_at_discharge < 6       THEN 1  -- age
+            WHEN NOT EXISTS (                          -- no 7-day post enrollment
+                SELECT 1 FROM eligibility_fact el
+                WHERE el.member_id = i.member_id
+                  AND el.cov_start_dt <= (i.discharge_dt + INTERVAL '7 days')::DATE
+                  AND el.cov_end_dt   >= (i.discharge_dt + INTERVAL '7 days')::DATE
+            ) THEN 1
+            ELSE 0
+        END AS exclusion_flag,
+        CASE
+            WHEN i.discharge_status = '20'    THEN 'EXCL_DEATH'
+            WHEN i.discharge_status = '30'    THEN 'EXCL_TRANSFER'
+            WHEN i.age_at_discharge < 6       THEN 'EXCL_AGE'
+            WHEN NOT EXISTS (
+                SELECT 1 FROM eligibility_fact el
+                WHERE el.member_id = i.member_id
+                  AND el.cov_start_dt <= (i.discharge_dt + INTERVAL '7 days')::DATE
+                  AND el.cov_end_dt   >= (i.discharge_dt + INTERVAL '7 days')::DATE
+            ) THEN 'EXCL_NO_POST_ENROLL'
+            ELSE 'DENOM_MET'
+        END AS reason_code
+    FROM mh_index_2022 i
+),
+
+-- ---------------------------------------------------------------------------
+-- 3C. Numerator — OP follow-up within 7 days
+-- ---------------------------------------------------------------------------
+fuh_results_2022 AS (
+    SELECT
+        d.encounter_id,
+        d.member_id,
+        d.facility_id,
+        d.discharge_dt,
+        d.exclusion_flag,
+        d.reason_code,
+        CASE WHEN d.exclusion_flag = 0 THEN 1 ELSE 0 END AS denominator_flag,
+        CASE
+            WHEN d.exclusion_flag = 0
+             AND EXISTS (
+                SELECT 1 FROM encounter_fact fu
+                WHERE fu.member_id   = d.member_id
+                  AND fu.enc_type    = 'OP'
+                  AND fu.admit_dt    > d.discharge_dt
+                  AND fu.admit_dt   <= (d.discharge_dt + INTERVAL '7 days')::DATE
+                  AND fu.primary_dx LIKE 'F%'
+             )
+            THEN 1 ELSE 0
+        END AS numerator_flag,
+        2022 AS measurement_year
+    FROM fuh_denom_2022 d
+)
+
+SELECT
+    'FUH' AS measure_id,
+    measurement_year,
+    encounter_id,
+    member_id,
+    facility_id,
+    discharge_dt,
+    denominator_flag,
+    exclusion_flag,
+    numerator_flag,
+    reason_code,
+    CASE WHEN numerator_flag = 1 THEN 'FOLLOW-UP MET'
+         WHEN denominator_flag = 1 THEN 'FOLLOW-UP MISSED'
+         ELSE 'EXCLUDED'
+    END AS fuh_status
+FROM fuh_results_2022
+ORDER BY member_id, discharge_dt;
+
+
+-- ---------------------------------------------------------------------------
+-- 3D. FUH 2023
+-- ---------------------------------------------------------------------------
+WITH mh_2023 AS (
+    SELECT e.encounter_id, e.member_id, e.facility_id,
+           e.discharge_dt, e.primary_dx, e.discharge_status,
+           DATE_PART('year', AGE(e.discharge_dt, m.dob)) AS age_at_discharge
+    FROM encounter_fact e
+    JOIN member_dim m ON e.member_id = m.member_id
+    WHERE e.enc_type = 'IP' AND e.primary_dx LIKE 'F%'
+      AND DATE_PART('year', e.discharge_dt) = 2023
+      AND e.discharge_dt IS NOT NULL
+)
+SELECT
+    'FUH' AS measure_id, 2023 AS measurement_year,
+    i.encounter_id, i.member_id, i.facility_id, i.discharge_dt,
+    CASE WHEN i.discharge_status NOT IN ('20','30') AND i.age_at_discharge>=6 THEN 1 ELSE 0 END AS denominator_flag,
+    CASE WHEN i.discharge_status IN ('20','30') OR i.age_at_discharge<6 THEN 1 ELSE 0 END AS exclusion_flag,
+    CASE
+        WHEN i.discharge_status NOT IN ('20','30') AND i.age_at_discharge>=6
+         AND EXISTS (SELECT 1 FROM encounter_fact fu
+                     WHERE fu.member_id=i.member_id AND fu.enc_type='OP'
+                       AND fu.admit_dt > i.discharge_dt
+                       AND fu.admit_dt <= (i.discharge_dt + INTERVAL '7 days')::DATE
+                       AND fu.primary_dx LIKE 'F%')
+        THEN 1 ELSE 0
+    END AS numerator_flag,
+    CASE WHEN i.discharge_status IN ('20','30') THEN 'EXCL_DEATH_OR_TRANSFER'
+         WHEN i.age_at_discharge < 6 THEN 'EXCL_AGE'
+         ELSE 'DENOM_MET'
+    END AS reason_code
+FROM mh_2023 i
+ORDER BY i.member_id, i.discharge_dt;
+
+
+-- ===========================================================================
+-- AGGREGATE RATE CHECKS — Quick summary per measure per year
+-- ===========================================================================
+
+-- READMIT_30 rate 2022
+WITH r22 AS (
+    SELECT
+        'READMIT_30' AS measure_id, 2022 AS measurement_year,
+        COUNT(*) FILTER (WHERE discharge_status NOT IN ('20','30')
+                            AND primary_dx NOT LIKE 'F%'
+                            AND DATE_PART('year',AGE(discharge_dt,m.dob))>=18) AS denom,
+        COUNT(*) FILTER (WHERE discharge_status IN ('20','30')
+                            OR primary_dx LIKE 'F%'
+                            OR DATE_PART('year',AGE(discharge_dt,m.dob))<18)  AS excl,
+        COUNT(*) FILTER (
+            WHERE discharge_status NOT IN ('20','30')
+              AND primary_dx NOT LIKE 'F%'
+              AND DATE_PART('year',AGE(discharge_dt,m.dob))>=18
+              AND EXISTS (
+                    SELECT 1 FROM encounter_fact r2
+                    WHERE r2.member_id    = e.member_id
+                      AND r2.enc_type     = 'IP'
+                      AND r2.encounter_id != e.encounter_id
+                      AND r2.admit_dt     > e.discharge_dt
+                      AND r2.admit_dt    <= (e.discharge_dt + INTERVAL '30 days')::DATE
+              )
+        ) AS numer
+    FROM encounter_fact e
+    JOIN member_dim m ON e.member_id = m.member_id
+    WHERE e.enc_type='IP' AND DATE_PART('year',e.discharge_dt)=2022
+)
+SELECT measure_id, measurement_year, denom, excl, numer,
+       ROUND(numer::NUMERIC / NULLIF(denom,0), 4) AS rate
+FROM r22;
+
+-- ===========================================================================
+-- DETAILED MEMBER-LEVEL ADHERENCE SUMMARY (PDC_DM 2022)
+-- Great for README "key findings" and output CSV
+-- ===========================================================================
+
+WITH fill_windows AS (
+    SELECT p.member_id,
+           GREATEST(p.fill_dt,'2022-01-01'::DATE) AS day_start,
+           LEAST((p.fill_dt + p.days_supply - 1)::DATE,'2022-12-31'::DATE) AS day_end
+    FROM pharmacy_claim_fact p
+    JOIN drug_dim d ON p.ndc=d.ndc
+    WHERE d.is_antidiabetic_flag=TRUE
+      AND p.fill_dt BETWEEN '2022-01-01' AND '2022-12-31'
+),
+exploded AS (
+    SELECT member_id,
+           generate_series(day_start, day_end, '1 day'::INTERVAL)::DATE AS cov_day
+    FROM fill_windows
+),
+unique_cov AS (SELECT member_id, cov_day FROM exploded GROUP BY member_id, cov_day),
+covered   AS (SELECT member_id, COUNT(*) AS covered_days FROM unique_cov GROUP BY member_id)
+
+SELECT
+    c.member_id,
+    m.sex,
+    DATE_PART('year', AGE('2022-12-31'::DATE, m.dob))::INT AS age_2022,
+    m.race_ethnicity,
+    c.covered_days,
+    365 AS eligible_days,
+    ROUND(c.covered_days / 365.0, 3) AS pdc,
+    CASE WHEN c.covered_days / 365.0 >= 0.80 THEN 'ADHERENT' ELSE 'NON-ADHERENT' END AS status
+FROM covered c
+JOIN member_dim m ON c.member_id = m.member_id
+ORDER BY pdc DESC;
+
