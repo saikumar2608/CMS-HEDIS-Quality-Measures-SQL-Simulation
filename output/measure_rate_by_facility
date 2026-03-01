@@ -1,0 +1,11 @@
+measure_id,measurement_year,facility_id,facility_name,facility_type,denom_count,numer_count,rate
+FUH_2022,2022,4,Northside Psychiatric Center,PSYCH,10,5,0.5000
+FUH_2023,2023,4,Northside Psychiatric Center,PSYCH,5,2,0.4000
+READMIT_30_2022,2022,4,Northside Psychiatric Center,PSYCH,0,0,
+READMIT_30_2022,2022,1,Metro General Hospital,ACUTE,21,8,0.3810
+READMIT_30_2022,2022,2,Riverside Medical Center,ACUTE,6,2,0.3333
+READMIT_30_2022,2022,3,Lakeside Community Hospital,ACUTE,2,0,0.0000
+READMIT_30_2023,2023,4,Northside Psychiatric Center,PSYCH,0,0,
+READMIT_30_2023,2023,1,Metro General Hospital,ACUTE,15,6,0.4000
+READMIT_30_2023,2023,3,Lakeside Community Hospital,ACUTE,2,0,0.0000
+READMIT_30_2023,2023,2,Riverside Medical Center,ACUTE,2,0,0.0000
