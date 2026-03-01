@@ -1,0 +1,511 @@
+
+
+-- ===========================================================================
+-- STEP 1: LOG MEASURE RUNS (audit trail — enterprise-grade pattern)
+-- ===========================================================================
+
+INSERT INTO measure_run_fact (run_id, measure_id, run_dt, parameters_json, code_version, run_by)
+VALUES
+(1, 'READMIT_30_2022', NOW(),
+ '{"measurement_year":2022,"lookback_days":30,"excl_death":true,"excl_transfer":true,"excl_psych_primary":true,"min_age":18}',
+ 'v1.0.0', 'saikumar'),
+(2, 'READMIT_30_2023', NOW(),
+ '{"measurement_year":2023,"lookback_days":30,"excl_death":true,"excl_transfer":true,"excl_psych_primary":true,"min_age":18}',
+ 'v1.0.0', 'saikumar'),
+(3, 'PDC_DM_2022', NOW(),
+ '{"measurement_year":2022,"pdc_threshold":0.80,"eligible_days":365,"min_fills":2,"drug_class":"antidiabetic"}',
+ 'v1.0.0', 'saikumar'),
+(4, 'PDC_DM_2023', NOW(),
+ '{"measurement_year":2023,"pdc_threshold":0.80,"eligible_days":365,"min_fills":2,"drug_class":"antidiabetic"}',
+ 'v1.0.0', 'saikumar'),
+(5, 'FUH_2022', NOW(),
+ '{"measurement_year":2022,"followup_days":7,"dx_filter":"F%","min_age":6,"excl_death":true,"excl_transfer":true}',
+ 'v1.0.0', 'saikumar'),
+(6, 'FUH_2023', NOW(),
+ '{"measurement_year":2023,"followup_days":7,"dx_filter":"F%","min_age":6,"excl_death":true,"excl_transfer":true}',
+ 'v1.0.0', 'saikumar');
+
+
+-- ===========================================================================
+-- STEP 2: POPULATE measure_member_result
+-- ===========================================================================
+
+-- READMIT_30 — 2022 member results
+INSERT INTO measure_member_result
+       (result_id, run_id, member_id, denominator_flag, numerator_flag,
+        exclusion_flag, reason_codes, index_event_dt, measurement_year)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY e.member_id, e.discharge_dt) + 1000 AS result_id,
+    1 AS run_id,
+    e.member_id,
+    CASE WHEN e.discharge_status NOT IN ('20','30')
+          AND e.primary_dx NOT LIKE 'F%'
+          AND DATE_PART('year',AGE(e.discharge_dt,m.dob)) >= 18 THEN 1 ELSE 0 END,
+    CASE
+        WHEN e.discharge_status NOT IN ('20','30')
+         AND e.primary_dx NOT LIKE 'F%'
+         AND DATE_PART('year',AGE(e.discharge_dt,m.dob)) >= 18
+         AND EXISTS (
+                SELECT 1 FROM encounter_fact r
+                WHERE r.member_id    = e.member_id
+                  AND r.enc_type     = 'IP'
+                  AND r.encounter_id != e.encounter_id
+                  AND r.admit_dt     > e.discharge_dt
+                  AND r.admit_dt    <= (e.discharge_dt + INTERVAL '30 days')::DATE
+             )
+        THEN 1 ELSE 0 END,
+    CASE WHEN e.discharge_status IN ('20','30')
+          OR e.primary_dx LIKE 'F%'
+          OR DATE_PART('year',AGE(e.discharge_dt,m.dob)) < 18 THEN 1 ELSE 0 END,
+    CASE WHEN e.discharge_status = '20'               THEN 'EXCL_DEATH'
+         WHEN e.discharge_status = '30'               THEN 'EXCL_TRANSFER'
+         WHEN e.primary_dx LIKE 'F%'                  THEN 'EXCL_PSYCH_DX'
+         WHEN DATE_PART('year',AGE(e.discharge_dt,m.dob)) < 18 THEN 'EXCL_AGE'
+         ELSE 'DENOM_MET'
+    END,
+    e.discharge_dt,
+    2022
+FROM encounter_fact e
+JOIN member_dim m ON e.member_id = m.member_id
+WHERE e.enc_type = 'IP'
+  AND DATE_PART('year', e.discharge_dt) = 2022
+  AND e.discharge_dt IS NOT NULL;
+
+
+-- READMIT_30 — 2023 member results
+INSERT INTO measure_member_result
+       (result_id, run_id, member_id, denominator_flag, numerator_flag,
+        exclusion_flag, reason_codes, index_event_dt, measurement_year)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY e.member_id, e.discharge_dt) + 2000,
+    2,
+    e.member_id,
+    CASE WHEN e.discharge_status NOT IN ('20','30')
+          AND e.primary_dx NOT LIKE 'F%'
+          AND DATE_PART('year',AGE(e.discharge_dt,m.dob)) >= 18 THEN 1 ELSE 0 END,
+    CASE
+        WHEN e.discharge_status NOT IN ('20','30')
+         AND e.primary_dx NOT LIKE 'F%'
+         AND DATE_PART('year',AGE(e.discharge_dt,m.dob)) >= 18
+         AND EXISTS (
+                SELECT 1 FROM encounter_fact r
+                WHERE r.member_id    = e.member_id
+                  AND r.enc_type     = 'IP'
+                  AND r.encounter_id != e.encounter_id
+                  AND r.admit_dt     > e.discharge_dt
+                  AND r.admit_dt    <= (e.discharge_dt + INTERVAL '30 days')::DATE
+             )
+        THEN 1 ELSE 0 END,
+    CASE WHEN e.discharge_status IN ('20','30')
+          OR e.primary_dx LIKE 'F%'
+          OR DATE_PART('year',AGE(e.discharge_dt,m.dob)) < 18 THEN 1 ELSE 0 END,
+    CASE WHEN e.discharge_status IN ('20','30') THEN 'EXCL_DEATH_OR_TRANSFER'
+         WHEN e.primary_dx LIKE 'F%'            THEN 'EXCL_PSYCH_DX'
+         ELSE 'DENOM_MET' END,
+    e.discharge_dt,
+    2023
+FROM encounter_fact e
+JOIN member_dim m ON e.member_id = m.member_id
+WHERE e.enc_type = 'IP'
+  AND DATE_PART('year', e.discharge_dt) = 2023
+  AND e.discharge_dt IS NOT NULL;
+
+
+-- PDC_DM — 2022 member results
+INSERT INTO measure_member_result
+       (result_id, run_id, member_id, denominator_flag, numerator_flag,
+        exclusion_flag, reason_codes, index_event_dt, measurement_year)
+WITH fill_windows AS (
+    SELECT p.member_id,
+           GREATEST(p.fill_dt,'2022-01-01'::DATE) AS ds,
+           LEAST((p.fill_dt + p.days_supply -1)::DATE,'2022-12-31'::DATE) AS de
+    FROM pharmacy_claim_fact p JOIN drug_dim d ON p.ndc=d.ndc
+    WHERE d.is_antidiabetic_flag=TRUE AND p.fill_dt BETWEEN '2022-01-01' AND '2022-12-31'
+),
+exploded AS (
+    SELECT member_id, generate_series(ds, de, '1 day'::INTERVAL)::DATE AS cd FROM fill_windows
+),
+unique_days AS (SELECT member_id, cd FROM exploded GROUP BY member_id, cd),
+cov_days   AS (SELECT member_id, COUNT(*) AS covered_days FROM unique_days GROUP BY member_id),
+fill_cnt   AS (
+    SELECT p.member_id, COUNT(*) AS fc, MIN(p.fill_dt) AS first_fill_dt
+    FROM pharmacy_claim_fact p JOIN drug_dim d ON p.ndc=d.ndc
+    WHERE d.is_antidiabetic_flag=TRUE AND p.fill_dt BETWEEN '2022-01-01' AND '2022-12-31'
+    GROUP BY p.member_id
+),
+enr AS (SELECT DISTINCT member_id FROM eligibility_fact WHERE cov_start_dt<='2022-01-01' AND cov_end_dt>='2022-12-31')
+SELECT
+    ROW_NUMBER() OVER (ORDER BY f.member_id) + 3000,
+    3,
+    f.member_id,
+    CASE WHEN e.member_id IS NOT NULL AND f.fc>=2 THEN 1 ELSE 0 END,
+    CASE WHEN COALESCE(c.covered_days,0)/365.0>=0.80 AND e.member_id IS NOT NULL AND f.fc>=2 THEN 1 ELSE 0 END,
+    CASE WHEN e.member_id IS NULL THEN 1 ELSE 0 END,
+    CASE WHEN e.member_id IS NULL THEN 'EXCL_ENROLLMENT_GAP'
+         WHEN f.fc<2 THEN 'EXCL_INSUFFICIENT_FILLS'
+         ELSE 'DENOM_MET' END,
+    f.first_fill_dt,
+    2022
+FROM fill_cnt f
+LEFT JOIN cov_days c ON f.member_id=c.member_id
+LEFT JOIN enr e      ON f.member_id=e.member_id;
+
+
+-- FUH — 2022 member results
+INSERT INTO measure_member_result
+       (result_id, run_id, member_id, denominator_flag, numerator_flag,
+        exclusion_flag, reason_codes, index_event_dt, measurement_year)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY e.member_id) + 5000,
+    5,
+    e.member_id,
+    CASE WHEN e.discharge_status NOT IN ('20','30')
+          AND DATE_PART('year',AGE(e.discharge_dt,m.dob)) >= 6 THEN 1 ELSE 0 END,
+    CASE
+        WHEN e.discharge_status NOT IN ('20','30')
+         AND DATE_PART('year',AGE(e.discharge_dt,m.dob)) >= 6
+         AND EXISTS (
+                SELECT 1 FROM encounter_fact fu
+                WHERE fu.member_id  = e.member_id
+                  AND fu.enc_type   = 'OP'
+                  AND fu.admit_dt   > e.discharge_dt
+                  AND fu.admit_dt  <= (e.discharge_dt + INTERVAL '7 days')::DATE
+                  AND fu.primary_dx LIKE 'F%'
+             )
+        THEN 1 ELSE 0 END,
+    CASE WHEN e.discharge_status IN ('20','30')
+          OR DATE_PART('year',AGE(e.discharge_dt,m.dob)) < 6 THEN 1 ELSE 0 END,
+    CASE WHEN e.discharge_status = '20' THEN 'EXCL_DEATH'
+         WHEN e.discharge_status = '30' THEN 'EXCL_TRANSFER'
+         ELSE 'DENOM_MET' END,
+    e.discharge_dt,
+    2022
+FROM encounter_fact e
+JOIN member_dim m ON e.member_id = m.member_id
+WHERE e.enc_type = 'IP'
+  AND e.primary_dx LIKE 'F%'
+  AND DATE_PART('year', e.discharge_dt) = 2022
+  AND e.discharge_dt IS NOT NULL;
+
+
+-- PDC_DM — 2023 member results  (run_id = 4)
+INSERT INTO measure_member_result
+       (result_id, run_id, member_id, denominator_flag, numerator_flag,
+        exclusion_flag, reason_codes, index_event_dt, measurement_year)
+WITH fill_windows AS (
+    SELECT p.member_id,
+           GREATEST(p.fill_dt,'2023-01-01'::DATE) AS ds,
+           LEAST((p.fill_dt + p.days_supply - 1)::DATE,'2023-12-31'::DATE) AS de
+    FROM pharmacy_claim_fact p JOIN drug_dim d ON p.ndc=d.ndc
+    WHERE d.is_antidiabetic_flag=TRUE AND p.fill_dt BETWEEN '2023-01-01' AND '2023-12-31'
+),
+exploded AS (
+    SELECT member_id, generate_series(ds, de, '1 day'::INTERVAL)::DATE AS cd FROM fill_windows
+),
+unique_days AS (SELECT member_id, cd FROM exploded GROUP BY member_id, cd),
+cov_days   AS (SELECT member_id, COUNT(*) AS covered_days FROM unique_days GROUP BY member_id),
+fill_cnt   AS (
+    SELECT p.member_id, COUNT(*) AS fc, MIN(p.fill_dt) AS first_fill_dt
+    FROM pharmacy_claim_fact p JOIN drug_dim d ON p.ndc=d.ndc
+    WHERE d.is_antidiabetic_flag=TRUE AND p.fill_dt BETWEEN '2023-01-01' AND '2023-12-31'
+    GROUP BY p.member_id
+),
+enr AS (SELECT DISTINCT member_id FROM eligibility_fact WHERE cov_start_dt<='2023-01-01' AND cov_end_dt>='2023-12-31')
+SELECT
+    ROW_NUMBER() OVER (ORDER BY f.member_id) + 4000,
+    4,
+    f.member_id,
+    CASE WHEN e.member_id IS NOT NULL AND f.fc>=2 THEN 1 ELSE 0 END,
+    CASE WHEN COALESCE(c.covered_days,0)/365.0>=0.80 AND e.member_id IS NOT NULL AND f.fc>=2 THEN 1 ELSE 0 END,
+    CASE WHEN e.member_id IS NULL THEN 1 ELSE 0 END,
+    CASE WHEN e.member_id IS NULL THEN 'EXCL_ENROLLMENT_GAP'
+         WHEN f.fc<2 THEN 'EXCL_INSUFFICIENT_FILLS'
+         ELSE 'DENOM_MET' END,
+    f.first_fill_dt,
+    2023
+FROM fill_cnt f
+LEFT JOIN cov_days c ON f.member_id=c.member_id
+LEFT JOIN enr e      ON f.member_id=e.member_id;
+
+
+-- FUH — 2023 member results  (run_id = 6)
+INSERT INTO measure_member_result
+       (result_id, run_id, member_id, denominator_flag, numerator_flag,
+        exclusion_flag, reason_codes, index_event_dt, measurement_year)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY e.member_id) + 6000,
+    6,
+    e.member_id,
+    CASE WHEN e.discharge_status NOT IN ('20','30')
+          AND DATE_PART('year',AGE(e.discharge_dt,m.dob)) >= 6 THEN 1 ELSE 0 END,
+    CASE
+        WHEN e.discharge_status NOT IN ('20','30')
+         AND DATE_PART('year',AGE(e.discharge_dt,m.dob)) >= 6
+         AND EXISTS (
+                SELECT 1 FROM encounter_fact fu
+                WHERE fu.member_id  = e.member_id
+                  AND fu.enc_type   = 'OP'
+                  AND fu.admit_dt   > e.discharge_dt
+                  AND fu.admit_dt  <= (e.discharge_dt + INTERVAL '7 days')::DATE
+                  AND fu.primary_dx LIKE 'F%'
+             )
+        THEN 1 ELSE 0 END,
+    CASE WHEN e.discharge_status IN ('20','30')
+          OR DATE_PART('year',AGE(e.discharge_dt,m.dob)) < 6 THEN 1 ELSE 0 END,
+    CASE WHEN e.discharge_status = '20' THEN 'EXCL_DEATH'
+         WHEN e.discharge_status = '30' THEN 'EXCL_TRANSFER'
+         ELSE 'DENOM_MET' END,
+    e.discharge_dt,
+    2023
+FROM encounter_fact e
+JOIN member_dim m ON e.member_id = m.member_id
+WHERE e.enc_type = 'IP'
+  AND e.primary_dx LIKE 'F%'
+  AND DATE_PART('year', e.discharge_dt) = 2023
+  AND e.discharge_dt IS NOT NULL;
+
+
+-- ===========================================================================
+-- STEP 3: POPULATE measure_rate_summary  (the key output table)
+-- ===========================================================================
+
+INSERT INTO measure_rate_summary (measure_id, measurement_year, denom_count, excl_count, numer_count, rate)
+SELECT
+    md.measure_id,
+    mmr.measurement_year,
+    SUM(mmr.denominator_flag)                                         AS denom_count,
+    SUM(mmr.exclusion_flag)                                           AS excl_count,
+    SUM(mmr.numerator_flag)                                           AS numer_count,
+    ROUND(SUM(mmr.numerator_flag)::NUMERIC / NULLIF(SUM(mmr.denominator_flag),0), 4) AS rate
+FROM measure_member_result mmr
+JOIN measure_run_fact mrf   ON mmr.run_id = mrf.run_id
+JOIN measure_dim md         ON mrf.measure_id = md.measure_id
+GROUP BY md.measure_id, mmr.measurement_year;
+
+-- Update run_fact with final counts
+UPDATE measure_run_fact mrf
+SET row_count_denom = mrs.denom_count,
+    row_count_numer = mrs.numer_count,
+    rate            = mrs.rate
+FROM measure_rate_summary mrs
+WHERE mrs.measure_id = mrf.measure_id
+  AND mrs.measurement_year = (mrf.parameters_json::json->>'measurement_year')::INT;
+
+
+-- ===========================================================================
+-- STEP 4: RATE BY FACILITY (stratification — key for stratified reporting)
+-- ===========================================================================
+
+INSERT INTO measure_rate_by_facility
+SELECT
+    mrf.measure_id,
+    mmr.measurement_year,
+    ef.facility_id,
+    SUM(mmr.denominator_flag) AS denom_count,
+    SUM(mmr.numerator_flag)   AS numer_count,
+    ROUND(SUM(mmr.numerator_flag)::NUMERIC / NULLIF(SUM(mmr.denominator_flag),0), 4) AS rate
+FROM measure_member_result mmr
+JOIN measure_run_fact   mrf ON mmr.run_id    = mrf.run_id
+JOIN encounter_fact      ef ON ef.member_id  = mmr.member_id
+                            AND DATE_PART('year', ef.discharge_dt) = mmr.measurement_year
+WHERE ef.facility_id IS NOT NULL
+GROUP BY mrf.measure_id, mmr.measurement_year, ef.facility_id;
+
+
+-- ===========================================================================
+-- STEP 5: RATE BY AGE BAND (stratification)
+-- ===========================================================================
+
+INSERT INTO measure_rate_by_age_band
+SELECT
+    mrf.measure_id,
+    mmr.measurement_year,
+    CASE
+        WHEN DATE_PART('year',AGE(mmr.index_event_dt, m.dob)) BETWEEN 18 AND 34 THEN '18-34'
+        WHEN DATE_PART('year',AGE(mmr.index_event_dt, m.dob)) BETWEEN 35 AND 49 THEN '35-49'
+        WHEN DATE_PART('year',AGE(mmr.index_event_dt, m.dob)) BETWEEN 50 AND 64 THEN '50-64'
+        ELSE '65+'
+    END AS age_band,
+    SUM(mmr.denominator_flag) AS denom_count,
+    SUM(mmr.numerator_flag)   AS numer_count,
+    ROUND(SUM(mmr.numerator_flag)::NUMERIC / NULLIF(SUM(mmr.denominator_flag),0), 4) AS rate
+FROM measure_member_result mmr
+JOIN measure_run_fact mrf ON mmr.run_id = mrf.run_id
+JOIN member_dim m         ON mmr.member_id = m.member_id
+WHERE mmr.index_event_dt IS NOT NULL
+GROUP BY mrf.measure_id, mmr.measurement_year,
+         CASE
+            WHEN DATE_PART('year',AGE(mmr.index_event_dt, m.dob)) BETWEEN 18 AND 34 THEN '18-34'
+            WHEN DATE_PART('year',AGE(mmr.index_event_dt, m.dob)) BETWEEN 35 AND 49 THEN '35-49'
+            WHEN DATE_PART('year',AGE(mmr.index_event_dt, m.dob)) BETWEEN 50 AND 64 THEN '50-64'
+            ELSE '65+'
+         END;
+
+
+-- ===========================================================================
+-- STEP 6: YEAR-OVER-YEAR TREND TABLE
+-- ===========================================================================
+
+INSERT INTO measure_trend
+SELECT
+    curr.measure_id,
+    curr.measurement_year,
+    curr.rate,
+    curr.denom_count,
+    curr.numer_count,
+    ROUND(curr.rate - COALESCE(prior.rate, curr.rate), 4) AS yoy_rate_change
+FROM measure_rate_summary curr
+LEFT JOIN measure_rate_summary prior
+       ON LEFT(prior.measure_id, POSITION('_' IN REVERSE(prior.measure_id)) * -1 + LENGTH(prior.measure_id))
+          = LEFT(curr.measure_id, POSITION('_' IN REVERSE(curr.measure_id)) * -1 + LENGTH(curr.measure_id))
+      AND prior.measurement_year = curr.measurement_year - 1;
+
+
+-- ===========================================================================
+-- FINAL REPORTING QUERIES
+-- (Copy output of these into /outputs CSVs for GitHub)
+-- ===========================================================================
+
+-- OUTPUT 1: measure_rate_summary.csv
+SELECT
+    measure_id,
+    measurement_year,
+    denom_count,
+    excl_count,
+    numer_count,
+    rate,
+    CASE
+        WHEN measure_id LIKE 'READMIT%' THEN 'Lower is better'
+        WHEN measure_id LIKE 'PDC%'     THEN 'Higher is better'
+        WHEN measure_id LIKE 'FUH%'     THEN 'Higher is better'
+    END AS direction,
+    run_dt
+FROM measure_rate_summary
+ORDER BY measure_id, measurement_year;
+
+
+-- OUTPUT 2: measure_rate_by_facility.csv
+SELECT
+    r.measure_id,
+    r.measurement_year,
+    r.facility_id,
+    f.facility_name,
+    f.facility_type,
+    r.denom_count,
+    r.numer_count,
+    r.rate
+FROM measure_rate_by_facility r
+JOIN facility_dim f ON r.facility_id = f.facility_id
+ORDER BY r.measure_id, r.measurement_year, r.rate DESC;
+
+
+-- OUTPUT 3: measure_member_detail.csv
+SELECT
+    mrf.measure_id,
+    mmr.measurement_year,
+    mmr.member_id,
+    m.sex,
+    DATE_PART('year', AGE(mmr.index_event_dt, m.dob))::INT AS age_at_event,
+    m.race_ethnicity,
+    mmr.denominator_flag,
+    mmr.exclusion_flag,
+    mmr.numerator_flag,
+    mmr.reason_codes,
+    mmr.index_event_dt
+FROM measure_member_result mmr
+JOIN measure_run_fact mrf ON mmr.run_id    = mrf.run_id
+JOIN member_dim m         ON mmr.member_id = m.member_id
+ORDER BY mrf.measure_id, mmr.measurement_year, mmr.member_id;
+
+
+-- OUTPUT 4: yoy_trend.csv
+SELECT
+    measure_id,
+    measurement_year,
+    denom_count,
+    numer_count,
+    rate,
+    yoy_rate_change,
+    CASE WHEN yoy_rate_change > 0 THEN 'IMPROVED'
+         WHEN yoy_rate_change < 0 THEN 'DECLINED'
+         ELSE 'NO CHANGE' END AS trend_direction
+FROM measure_trend
+ORDER BY measure_id, measurement_year;
+
+
+-- OUTPUT 5: age_band_stratification.csv
+SELECT
+    measure_id,
+    measurement_year,
+    age_band,
+    denom_count,
+    numer_count,
+    rate
+FROM measure_rate_by_age_band
+ORDER BY measure_id, measurement_year, age_band;
+
+
+-- ===========================================================================
+-- MEASURE RUN AUDIT LOG — shows enterprise-grade tracking
+-- ===========================================================================
+
+SELECT
+    run_id,
+    measure_id,
+    run_dt,
+    parameters_json,
+    code_version,
+    run_by,
+    row_count_denom,
+    row_count_numer,
+    rate
+FROM measure_run_fact
+ORDER BY run_id;
+
+
+-- ===========================================================================
+-- VALIDATION QUERIES — sanity checks before finalizing outputs
+-- ===========================================================================
+
+-- Check 1: No member can have numerator=1 without denominator=1
+SELECT COUNT(*) AS invalid_numer_without_denom
+FROM measure_member_result
+WHERE numerator_flag = 1 AND denominator_flag = 0;
+-- Expected: 0
+
+-- Check 2: No member can have both exclusion=1 and denominator=1
+SELECT COUNT(*) AS invalid_excl_and_denom
+FROM measure_member_result
+WHERE exclusion_flag = 1 AND denominator_flag = 1;
+-- Expected: 0
+
+-- Check 3: Rate summary reconciles to member-level
+SELECT
+    mrf.measure_id,
+    mmr.measurement_year,
+    SUM(mmr.denominator_flag) AS member_level_denom,
+    mrs.denom_count           AS summary_denom,
+    SUM(mmr.denominator_flag) - mrs.denom_count AS discrepancy
+FROM measure_member_result mmr
+JOIN measure_run_fact mrf     ON mmr.run_id    = mrf.run_id
+JOIN measure_rate_summary mrs ON mrs.measure_id = mrf.measure_id
+                              AND mrs.measurement_year = mmr.measurement_year
+GROUP BY mrf.measure_id, mmr.measurement_year, mrs.denom_count;
+-- Expected: discrepancy = 0 for all rows
+
+-- Check 4: All 6 measures have rate summary rows
+SELECT COUNT(*) AS measure_rate_rows FROM measure_rate_summary;
+-- Expected: 6
+
+-- Check 5: Encounter dates are logically valid (discharge_dt >= admit_dt on same row)
+SELECT COUNT(*) AS invalid_encounter_dates
+FROM encounter_fact
+WHERE enc_type = 'IP'
+  AND discharge_dt IS NOT NULL
+  AND admit_dt IS NOT NULL
+  AND discharge_dt < admit_dt;
+-- Expected: 0  (discharge can never be before admission)
+
+-- =============================================================================
+-- END OF REPORTING OUTPUTS
+-- =============================================================================
